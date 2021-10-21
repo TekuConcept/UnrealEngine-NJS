@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 0.1,
+	"VersionName": "0.1",
+	"FriendlyName": "NodeJS",
+	"Description": "Embedded NodeJS Scripting",
+	"Category": "Other",
+	"CreatedBy": "TekuConcept",
+	"CreatedByURL": "https://github.com/TekuConcept/UnrealEngine-NJS",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/TekuConcept/UnrealEngine-NJS/issues",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "EmbeddedNodeJS",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

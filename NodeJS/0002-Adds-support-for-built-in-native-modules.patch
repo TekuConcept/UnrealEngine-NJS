@@ -1,0 +1,129 @@
+From c87ec5f7a8d24dd6ab2e14e9345879d3b8491c8d Mon Sep 17 00:00:00 2001
+From: TekuConcept <electro_madness@yahoo.com>
+Date: Mon, 18 Oct 2021 16:00:56 -0600
+Subject: [PATCH 2/4] Adds support for built-in native modules
+
+---
+ src/node.cc               | 8 +++++++-
+ src/node.h                | 2 ++
+ src/node_main_instance.cc | 9 ++++++++-
+ src/node_main_instance.h  | 9 +++++++--
+ 4 files changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/src/node.cc b/src/node.cc
+index 0fe020de70..513741b64e 100644
+--- a/src/node.cc
++++ b/src/node.cc
+@@ -1167,7 +1167,7 @@ int XInitialize(int argc, char** argv, std::shared_ptr<NodeContext>& context) {
+ }
+ 
+ int XStep(std::shared_ptr<NodeContext> context, bool& isFinished) {
+-  if (context == nullptr) {
++  if (context == nullptr || !context->initialized) {
+     isFinished = true;
+     return 1;
+   }
+@@ -1184,6 +1184,12 @@ void XExit(std::shared_ptr<NodeContext> context) {
+   context->initialized = false;
+ }
+ 
++int XScopedInvoke(std::shared_ptr<struct NodeContext> context, std::function<void()> callback) {
++  if (context == nullptr || !context->initialized) return 1;
++  context->main_instance->Invoke(context, callback);
++  return 0;
++}
++
+ int Start(int argc, char** argv) {
+   InitializationResult result = InitializeOncePerProcess(argc, argv);
+   if (result.early_return) {
+diff --git a/src/node.h b/src/node.h
+index 0a2349eb46..c731743c94 100644
+--- a/src/node.h
++++ b/src/node.h
+@@ -238,6 +238,8 @@ NODE_EXTERN int XInitialize(int argc, char** argv, std::shared_ptr<struct NodeCo
+ NODE_EXTERN int XStep(std::shared_ptr<NodeContext> context, bool& isFinished);
+ // Tears down the node context
+ NODE_EXTERN void XExit(std::shared_ptr<struct NodeContext> context);
++// Invokes the given callback within the isolate scope
++NODE_EXTERN int XScopedInvoke(std::shared_ptr<struct NodeContext> context, std::function<void()> callback);
+ 
+ // TODO(addaleax): Officially deprecate this and replace it with something
+ // better suited for a public embedder API.
+diff --git a/src/node_main_instance.cc b/src/node_main_instance.cc
+index 0c640eabee..92d4eb30bd 100644
+--- a/src/node_main_instance.cc
++++ b/src/node_main_instance.cc
+@@ -184,7 +184,6 @@ int NodeMainInstance::Step(std::shared_ptr<NodeContext> context, bool& isFinishe
+   Locker locker(isolate_);
+   Isolate::Scope isolate_scope(isolate_);
+   HandleScope handle_scope(isolate_);
+-
+   Context::Scope context_scope(context->env->context());
+   Step(&context->exit_code, isFinished, context->env.get());
+   return context->exit_code;
+@@ -216,6 +215,14 @@ void NodeMainInstance::Exit(std::shared_ptr<NodeContext> context) {
+   #endif
+ }
+ 
++void NodeMainInstance::Invoke(std::shared_ptr<NodeContext> context, std::function<void()> callback) {
++  Locker locker(isolate_);
++  Isolate::Scope isolate_scope(isolate_);
++  HandleScope handle_scope(isolate_);
++  Context::Scope context_scope(context->env->context());
++  if (callback) callback();
++}
++
+ DeleteFnPtr<Environment, FreeEnvironment>
+ NodeMainInstance::CreateMainEnvironment(int* exit_code,
+                                         const EnvSerializeInfo* env_info) {
+diff --git a/src/node_main_instance.h b/src/node_main_instance.h
+index a332efdc6e..01549c1169 100644
+--- a/src/node_main_instance.h
++++ b/src/node_main_instance.h
+@@ -5,6 +5,7 @@
+ 
+ #include <cstddef>
+ #include <memory>
++#include <functional>
+ 
+ #include "node.h"
+ #include "util.h"
+@@ -18,22 +19,25 @@ struct EnvSerializeInfo;
+ 
+ class NodeMainInstance;
+ typedef struct NodeContext {
++  // scope: node-custom
+   bool initialized;
+-  int exit_code;
+ 
++  // scope" node
+   v8::Isolate::CreateParams params;
+   const std::vector<size_t>* indices;
+   const EnvSerializeInfo* env_info;
+   std::shared_ptr<NodeMainInstance> main_instance;
+   uv_loop_t main_loop;
+ 
++  // scope: NodeMainInstance
++  int exit_code;
+   DeleteFnPtr<Environment, FreeEnvironment> env;
+ 
+   NodeContext()
+   : initialized(false),
+-    exit_code(0),
+     indices(nullptr),
+     env_info(nullptr),
++    exit_code(0),
+     env(nullptr) {}
+ } NodeContext;
+ 
+@@ -87,6 +91,7 @@ class NodeMainInstance {
+   void Step(int* exit_code, bool& isFinished, Environment* env);
+   void Initialize(std::shared_ptr<NodeContext> context);
+   void Exit(std::shared_ptr<NodeContext> context);
++  void Invoke(std::shared_ptr<NodeContext> context, std::function<void()> callback);
+ 
+   IsolateData* isolate_data() { return isolate_data_.get(); }
+ 
+-- 
+2.30.0.windows.1
+

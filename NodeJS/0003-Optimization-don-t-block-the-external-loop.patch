@@ -1,0 +1,25 @@
+From d810e2960d678db56260b2432bf77298066f7146 Mon Sep 17 00:00:00 2001
+From: TekuConcept <electro_madness@yahoo.com>
+Date: Wed, 20 Oct 2021 16:03:54 -0600
+Subject: [PATCH 3/4] Optimization - don't block the external loop
+
+---
+ src/api/embed_helpers.cc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/api/embed_helpers.cc b/src/api/embed_helpers.cc
+index c344bb39c7..49a0dd1b79 100644
+--- a/src/api/embed_helpers.cc
++++ b/src/api/embed_helpers.cc
+@@ -75,7 +75,7 @@ Maybe<int> StepEventLoop(Environment* env, bool& isFinished) {
+     return Nothing<int>();
+   }
+ 
+-  uv_run(env->event_loop(), UV_RUN_ONCE);
++  uv_run(env->event_loop(), UV_RUN_NOWAIT);
+   if (env->is_stopping()) {
+     isFinished = true;
+     return Nothing<int>();
+-- 
+2.30.0.windows.1
+

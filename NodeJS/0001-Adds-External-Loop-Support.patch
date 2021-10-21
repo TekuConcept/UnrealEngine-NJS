@@ -1,0 +1,274 @@
+From 02be4d97bc00ea56d7dfb647d23b948e764b1a52 Mon Sep 17 00:00:00 2001
+From: TekuConcept <electro_madness@yahoo.com>
+Date: Sun, 17 Oct 2021 17:33:33 -0600
+Subject: [PATCH 1/4] Adds External Loop Support
+
+---
+ src/api/embed_helpers.cc  | 46 +++++++++++++++++++++++++++++++++
+ src/node.cc               | 53 +++++++++++++++++++++++++++++++++++++++
+ src/node.h                | 13 ++++++++++
+ src/node_main_instance.cc | 50 ++++++++++++++++++++++++++++++++++++
+ src/node_main_instance.h  | 27 ++++++++++++++++++++
+ 5 files changed, 189 insertions(+)
+
+diff --git a/src/api/embed_helpers.cc b/src/api/embed_helpers.cc
+index 8e2fc67695..c344bb39c7 100644
+--- a/src/api/embed_helpers.cc
++++ b/src/api/embed_helpers.cc
+@@ -59,6 +59,52 @@ Maybe<int> SpinEventLoop(Environment* env) {
+   return EmitProcessExit(env);
+ }
+ 
++Maybe<int> StepEventLoop(Environment* env, bool& isFinished) {
++  CHECK_NOT_NULL(env);
++  MultiIsolatePlatform* platform = GetMultiIsolatePlatform(env);
++  CHECK_NOT_NULL(platform);
++  const int good = 0;
++
++  Isolate* isolate = env->isolate();
++  HandleScope handle_scope(isolate);
++  Context::Scope context_scope(env->context());
++  SealHandleScope seal(isolate);
++
++  if (env->is_stopping()) {
++    isFinished = true;
++    return Nothing<int>();
++  }
++
++  uv_run(env->event_loop(), UV_RUN_ONCE);
++  if (env->is_stopping()) {
++    isFinished = true;
++    return Nothing<int>();
++  }
++
++  isFinished = !uv_loop_alive(env->event_loop());
++  if (!isFinished && !env->is_stopping()) return v8::Just<int>(good);
++
++  if (EmitProcessBeforeExit(env).IsNothing()) {
++    isFinished = true;
++    return Nothing<int>();
++  }
++
++  isFinished = !uv_loop_alive(env->event_loop());
++  if (!isFinished && !env->is_stopping()) return v8::Just<int>(good);
++
++  if (env->is_stopping()) {
++    isFinished = true;
++    return Nothing<int>();
++  }
++
++  env->performance_state()->Mark(node::performance::NODE_PERFORMANCE_MILESTONE_LOOP_EXIT);
++  env->set_trace_sync_io(false);
++  env->PrintInfoForSnapshotIfDebug();
++  env->VerifyNoStrongBaseObjects();
++  isFinished = true;
++  return EmitProcessExit(env);
++}
++
+ struct CommonEnvironmentSetup::Impl {
+   MultiIsolatePlatform* platform = nullptr;
+   uv_loop_t loop;
+diff --git a/src/node.cc b/src/node.cc
+index 0fa51b2697..0fe020de70 100644
+--- a/src/node.cc
++++ b/src/node.cc
+@@ -1131,6 +1131,59 @@ void TearDownOncePerProcess() {
+   per_process::v8_platform.Dispose();
+ }
+ 
++int XInitialize(int argc, char** argv, std::shared_ptr<NodeContext>& context) {
++  if (context != nullptr && context->initialized) return 1;
++  context = std::make_shared<NodeContext>();
++
++  InitializationResult result = InitializeOncePerProcess(argc, argv);
++  if (result.early_return) { return result.exit_code; }
++
++  {
++    bool use_node_snapshot = per_process::cli_options->per_isolate->node_snapshot;
++    if (use_node_snapshot) {
++      v8::StartupData* blob = NodeMainInstance::GetEmbeddedSnapshotBlob();
++      if (blob != nullptr) {
++        context->params.snapshot_blob = blob;
++        context->indices = NodeMainInstance::GetIsolateDataIndices();
++        context->env_info = NodeMainInstance::GetEnvSerializeInfo();
++      }
++    }
++
++    uv_loop_init(&context->main_loop);
++    uv_loop_configure(&context->main_loop, UV_METRICS_IDLE_TIME);
++
++    context->main_instance = std::make_shared<NodeMainInstance>(
++      &context->params,
++      &context->main_loop,
++      per_process::v8_platform.Platform(),
++      result.args,
++      result.exec_args,
++      context->indices);
++    context->main_instance->Initialize(context);
++  }
++
++  context->initialized = true;
++  return 0;
++}
++
++int XStep(std::shared_ptr<NodeContext> context, bool& isFinished) {
++  if (context == nullptr) {
++    isFinished = true;
++    return 1;
++  }
++
++  return context->main_instance->Step(context, isFinished);
++  // isFinished = true;
++  // return context->main_instance->Run(context->env_info);
++}
++
++void XExit(std::shared_ptr<NodeContext> context) {
++  if (context == nullptr || !context->initialized) return;
++  context->main_instance->Exit(context);
++  TearDownOncePerProcess();
++  context->initialized = false;
++}
++
+ int Start(int argc, char** argv) {
+   InitializationResult result = InitializeOncePerProcess(argc, argv);
+   if (result.early_return) {
+diff --git a/src/node.h b/src/node.h
+index 8d9e993525..0a2349eb46 100644
+--- a/src/node.h
++++ b/src/node.h
+@@ -228,6 +228,17 @@ enum Flags : uint64_t {
+ };
+ }  // namespace ProcessFlags
+ 
++struct NodeContext;
++
++// Sets up the node context for external control
++NODE_EXTERN int XInitialize(int argc, char** argv, std::shared_ptr<struct NodeContext>& context);
++// Runs a single iteration on the node context
++// isFinished is set to true when there are no more handles to access or thunks to run
++// A non-zero return value indicates that an error has occured and the context should be closed
++NODE_EXTERN int XStep(std::shared_ptr<NodeContext> context, bool& isFinished);
++// Tears down the node context
++NODE_EXTERN void XExit(std::shared_ptr<struct NodeContext> context);
++
+ // TODO(addaleax): Officially deprecate this and replace it with something
+ // better suited for a public embedder API.
+ NODE_EXTERN int Start(int argc, char* argv[]);
+@@ -566,6 +577,8 @@ NODE_EXTERN struct uv_loop_s* GetCurrentEventLoop(v8::Isolate* isolate);
+ // as soon as possible, returning an empty `Maybe`.
+ // This function only works if `env` has an associated `MultiIsolatePlatform`.
+ NODE_EXTERN v8::Maybe<int> SpinEventLoop(Environment* env);
++// Steps through one iteration of the main loop for the given environment.
++NODE_EXTERN v8::Maybe<int> StepEventLoop(Environment* end, bool& isFinished);
+ 
+ class NODE_EXTERN CommonEnvironmentSetup {
+  public:
+diff --git a/src/node_main_instance.cc b/src/node_main_instance.cc
+index ce319cca3e..0c640eabee 100644
+--- a/src/node_main_instance.cc
++++ b/src/node_main_instance.cc
+@@ -166,6 +166,56 @@ void NodeMainInstance::Run(int* exit_code, Environment* env) {
+ #endif
+ }
+ 
++void NodeMainInstance::Initialize(std::shared_ptr<NodeContext> context) {
++  Locker locker(isolate_);
++  Isolate::Scope isolate_scope(isolate_);
++  HandleScope handle_scope(isolate_);
++
++  context->env = CreateMainEnvironment(&context->exit_code, context->env_info);
++  CHECK_NOT_NULL(context->env);
++
++  Context::Scope context_scope(context->env->context());
++  LoadEnvironment(context->env.get(), node::StartExecutionCallback{});
++  context->env->set_trace_sync_io(context->env->options()->trace_sync_io);
++  context->env->performance_state()->Mark(node::performance::NODE_PERFORMANCE_MILESTONE_LOOP_START);
++}
++
++int NodeMainInstance::Step(std::shared_ptr<NodeContext> context, bool& isFinished) {
++  Locker locker(isolate_);
++  Isolate::Scope isolate_scope(isolate_);
++  HandleScope handle_scope(isolate_);
++
++  Context::Scope context_scope(context->env->context());
++  Step(&context->exit_code, isFinished, context->env.get());
++  return context->exit_code;
++}
++
++void NodeMainInstance::Step(int* exit_code, bool& isFinished, Environment* env) {
++  if (*exit_code == 0) {
++    *exit_code = StepEventLoop(env, isFinished).FromMaybe(1);
++  }
++  else isFinished = true;
++}
++
++void NodeMainInstance::Exit(std::shared_ptr<NodeContext> context) {
++  ResetStdio();
++
++  #if HAVE_INSPECTOR && defined(__POSIX__) && !defined(NODE_SHARED_MODE)
++    struct sigaction act;
++    memset(&act, 0, sizeof(act));
++    for (unsigned nr = 1; nr < kMaxSignal; nr += 1) {
++      if (nr == SIGKILL || nr == SIGSTOP || nr == SIGPROF)
++        continue;
++      act.sa_handler = (nr == SIGPIPE) ? SIG_IGN : SIG_DFL;
++      CHECK_EQ(0, sigaction(nr, &act, nullptr));
++    }
++  #endif
++
++  #if defined(LEAK_SANITIZER)
++    __lsan_do_leak_check();
++  #endif
++}
++
+ DeleteFnPtr<Environment, FreeEnvironment>
+ NodeMainInstance::CreateMainEnvironment(int* exit_code,
+                                         const EnvSerializeInfo* env_info) {
+diff --git a/src/node_main_instance.h b/src/node_main_instance.h
+index 047bdca873..a332efdc6e 100644
+--- a/src/node_main_instance.h
++++ b/src/node_main_instance.h
+@@ -16,6 +16,28 @@ namespace node {
+ class ExternalReferenceRegistry;
+ struct EnvSerializeInfo;
+ 
++class NodeMainInstance;
++typedef struct NodeContext {
++  bool initialized;
++  int exit_code;
++
++  v8::Isolate::CreateParams params;
++  const std::vector<size_t>* indices;
++  const EnvSerializeInfo* env_info;
++  std::shared_ptr<NodeMainInstance> main_instance;
++  uv_loop_t main_loop;
++
++  DeleteFnPtr<Environment, FreeEnvironment> env;
++
++  NodeContext()
++  : initialized(false),
++    exit_code(0),
++    indices(nullptr),
++    env_info(nullptr),
++    env(nullptr) {}
++} NodeContext;
++
++
+ // TODO(joyeecheung): align this with the Worker/WorkerThreadData class.
+ // We may be able to create an abstract class to reuse some of the routines.
+ class NodeMainInstance {
+@@ -60,6 +82,11 @@ class NodeMainInstance {
+   // Start running the Node.js instances, return the exit code when finished.
+   int Run(const EnvSerializeInfo* env_info);
+   void Run(int* exit_code, Environment* env);
++  // Run the Node.js instance once, return the status code and whether or not we're finished.
++  int Step(std::shared_ptr<NodeContext> context, bool& isFinished);
++  void Step(int* exit_code, bool& isFinished, Environment* env);
++  void Initialize(std::shared_ptr<NodeContext> context);
++  void Exit(std::shared_ptr<NodeContext> context);
+ 
+   IsolateData* isolate_data() { return isolate_data_.get(); }
+ 
+-- 
+2.30.0.windows.1
+

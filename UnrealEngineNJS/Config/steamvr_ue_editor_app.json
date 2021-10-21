@@ -1,0 +1,18 @@
+{
+	"source": "UE",
+	"applications": [
+		{
+			"app_key": "application.generated.ue.unrealenginenjs-17735300.ue4editor.exe",
+			"launch_type": "url",
+			"url": "steam://launch/",
+			"action_manifest_path": "M:/Home/TekuConcept/Documents/GitHub/UnrealEngine-NJS/UnrealEngineNJS/Config/SteamVRBindings/steamvr_manifest.json",
+			"strings":
+			{
+				"en_us":
+				{
+					"name": "UnrealEngineNJS-17735300 [UE Editor]"
+				}
+			}
+		}
+	]
+}
